@@ -1,24 +1,33 @@
-# models.py
+# models.py (Corrected Version)
+
 import torch
 import whisperx
 import librosa
 import numpy as np
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-from phonemizer.backend import EspeakBackend
-from phonemizer.backend.espeak.wrapper import EspeakWrapper
-from style_tts2.tts import StyleTTS
 import yaml
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import sys
+import os
+
+# --- Add StyleTTS2 to path ---
+# This is the crucial correction.
+# It allows us to import StyleTTS2 modules from the cloned directory.
+style_tts_path = os.path.join(os.path.dirname(__file__), 'StyleTTS2')
+if style_tts_path not in sys.path:
+    sys.path.append(style_tts_path)
+# --- End of correction ---
+
+from phonemizer.backend import EspeakBackend
+# This import now works because of the path change above
+from style_tts2.tts import StyleTTS
 
 import config
 import utils
 
 # Setup logger
 logger = logging.getLogger(__name__)
-
-# Set Espeak path if needed (often required in cloud environments)
-# EspeakWrapper.set_library('/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1')
 
 class ModelManager:
     """A singleton class to load and manage all ML models."""
@@ -34,7 +43,7 @@ class ModelManager:
             logger.info("Initializing ModelManager...")
             self.device = config.DEVICE
             self.compute_type = config.COMPUTE_TYPE
-            self.executor = ThreadPoolExecutor(max_workers=3) # For blocking TTS tasks
+            self.executor = ThreadPoolExecutor(max_workers=3)
             
             self.asr_model = None
             self.emotion_model = None
@@ -49,7 +58,7 @@ class ModelManager:
         """Loads all models into memory."""
         logger.info(f"Loading models on device: {self.device}")
         
-        # 1. Load ASR Model (WhisperX)
+        # 1. Load ASR Model (WhisperX) - No changes here
         logger.info(f"Loading ASR model: {config.ASR_MODEL}")
         self.asr_model = whisperx.load_model(
             config.ASR_MODEL,
@@ -59,7 +68,7 @@ class ModelManager:
         )
         logger.info("✅ ASR model loaded.")
 
-        # 2. Load Emotion Recognition Model
+        # 2. Load Emotion Recognition Model - No changes here
         logger.info(f"Loading Emotion model: {config.EMOTION_MODEL}")
         self.emotion_model = pipeline(
             "audio-classification",
@@ -68,7 +77,7 @@ class ModelManager:
         )
         logger.info("✅ Emotion model loaded.")
 
-        # 3. Load LLM (Llama 3)
+        # 3. Load LLM (Llama 3) - No changes here
         logger.info(f"Loading LLM: {config.LLM_MODEL}")
         self.llm_model = AutoModelForCausalLM.from_pretrained(
             config.LLM_MODEL,
@@ -79,17 +88,21 @@ class ModelManager:
         self.llm_tokenizer = AutoTokenizer.from_pretrained(config.LLM_MODEL)
         logger.info("✅ LLM loaded.")
 
-        # 4. Load TTS (StyleTTS 2)
-        logger.info(f"Loading TTS model: {config.TTS_MODEL}")
-        model_path = config.TTS_MODEL
-        config_path = config.TTS_CONFIG
-        with open(config_path, 'r') as f:
+        # 4. Load TTS (StyleTTS 2) - This section is updated
+        logger.info(f"Loading TTS model from local path: {config.TTS_MODEL_PATH}")
+        if not os.path.exists(config.TTS_MODEL_PATH) or not os.path.exists(config.TTS_CONFIG_PATH):
+            logger.error("StyleTTS2 model or config not found!")
+            logger.error(f"Please make sure '{config.TTS_MODEL_PATH}' and '{config.TTS_CONFIG_PATH}' exist.")
+            logger.error("Run the download commands from the setup instructions.")
+            raise FileNotFoundError("StyleTTS2 model files not found.")
+
+        with open(config.TTS_CONFIG_PATH, 'r') as f:
             tts_config = yaml.safe_load(f)
 
         self.tts_model = StyleTTS(
-            text_aligner_path=tts_config['data']['text_aligner_path'],
-            style_encoder_path=tts_config['model']['style_encoder_path'],
-            model_path=model_path
+            text_aligner_path=os.path.join(config.TTS_MODEL_DIR, tts_config['data']['text_aligner_path']),
+            style_encoder_path=os.path.join(config.TTS_MODEL_DIR, tts_config['model']['style_encoder_path']),
+            model_path=config.TTS_MODEL_PATH
         )
         self.tts_model.to(self.device)
         self.phonemizer = EspeakBackend(language='en-us', with_stress=True)
@@ -97,6 +110,8 @@ class ModelManager:
         
         logger.info("🎉 All models loaded successfully!")
 
+    # The rest of the ModelManager class (transcribe, classify_emotion, generate_response, _blocking_synthesize, synthesize_speech)
+    # remains exactly the same as before. No changes are needed there.
     def transcribe(self, audio_float32: np.ndarray) -> str:
         """Transcribes audio using WhisperX."""
         if self.asr_model is None:
@@ -109,14 +124,12 @@ class ModelManager:
         if self.emotion_model is None:
             raise RuntimeError("Emotion model not loaded.")
         
-        # Ensure audio has minimal length
         if len(audio_float32) < 1000:
             return "neutral"
             
         result = self.emotion_model(
             {"raw": audio_float32, "sampling_rate": config.AUDIO_SAMPLE_RATE_EMO}
         )
-        # Get the emotion with the highest score
         emotion = sorted(result, key=lambda x: x['score'], reverse=True)[0]['label']
         return emotion
 
@@ -125,7 +138,6 @@ class ModelManager:
         if self.llm_model is None or self.llm_tokenizer is None:
             raise RuntimeError("LLM not loaded.")
         
-        # Basic prompt engineering
         system_prompt = f"""You are Eva, an advanced, empathetic AI assistant. You are having a voice conversation.
 Be concise, conversational, and human-like. The user sounds {emotion}.
 Your task is to generate a JSON object with two keys: 'response' for what you will say, and 'style_hint' for how you will say it.
@@ -164,16 +176,13 @@ The style_hint should be a short phrase describing the desired tone, e.g., 'calm
         if self.tts_model is None or self.phonemizer is None:
             raise RuntimeError("TTS model not loaded.")
             
-        # The 'style_hint' gives StyleTTS2 context for generating the speech style.
-        # This is a powerful feature of this model.
         phonemes = self.phonemizer.phonemize([text], strip=True)[0]
         
         with torch.inference_mode():
-            # Use the style_hint as the reference text for the style encoder
             output = self.tts_model.synthesize(
                 phonemes,
                 text_prompt=style_hint,
-                style_speaker=None, # Not cloning a specific speaker
+                style_speaker=None,
                 lang='en-us',
                 alpha=0.3, beta=0.7, diffusion_steps=10, embedding_scale=1.5
             )
