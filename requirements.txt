@@ -6,16 +6,14 @@ accelerate==0.30.1
 bitsandbytes==0.43.1
 
 # ASR & Audio
-librosa==0.10.2
-# VAD
-# Comes with torch.hub
+librosa
 
 # TTS (The New Model)
 TTS==0.22.0
 
 # Web Server & WebRTC
-aiohttp==3.9.5
-aiortc==1.6.0
-uvloop==0.19.0
-numpy==1.26.4
+aiohttp
+aiortc
+uvloop
+numpy
 av
