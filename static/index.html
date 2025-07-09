@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>UltraMind AI Agent</title>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #2c3e50; color: #ecf0f1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .container { background: #34495e; padding: 40px; border-radius: 10px; box-shadow: 0 10px 20px rgba(0,0,0,0.2); text-align: center; max-width: 600px; width: 100%; }
+        h1 { margin-bottom: 30px; font-weight: 300; }
+        button { background: #2ecc71; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 5px; cursor: pointer; margin: 10px; transition: all 0.3s; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        button:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
+        .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
+        .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s; }
+        .status.connected { background: #27ae60; } .status.disconnected { background: #c0392b; } .status.connecting { background: #f39c12; }
+        .status.speaking { background: #3498db; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(52, 152, 219, 0); } 100% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧠 UltraMind AI Agent</h1>
+        <div class="controls">
+            <button id="startBtn" onclick="start()">START</button>
+            <button id="stopBtn" onclick="stop()" class="stop-btn" disabled>STOP</button>
+        </div>
+        <div id="status" class="status disconnected">🔌 Disconnected</div>
+        <audio id="remoteAudio" autoplay playsinline></audio>
+    </div>
+<script>
+    let pc, ws, localStream;
+    const remoteAudio = document.getElementById('remoteAudio');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const statusDiv = document.getElementById('status');
+    const STUN_SERVER = 'stun:stun.l.google.com:19302';
+
+    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
+
+    async function start() {
+        startBtn.disabled = true;
+        updateStatus('🔄 Connecting...', 'connecting');
+        try {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioContext.state === 'suspended') { await audioContext.resume(); }
+
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            pc = new RTCPeerConnection({ iceServers: [{ urls: STUN_SERVER }] });
+            
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            pc.ontrack = e => {
+                console.log('Remote track received!');
+                if (remoteAudio.srcObject !== e.streams[0]) {
+                    remoteAudio.srcObject = e.streams[0];
+                    remoteAudio.play().catch(err => console.error("Autoplay failed:", err));
+                    
+                    remoteAudio.onplaying = () => {
+                        updateStatus('🤖 AI Speaking...', 'speaking');
+                    };
+                    remoteAudio.onended = () => {
+                         if(pc.connectionState === 'connected') updateStatus('✅ Listening...', 'connected');
+                    };
+                }
+            };
+
+            pc.onicecandidate = e => {
+                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() }));
+                }
+            };
+            
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
+                console.log(`Connection state: ${state}`);
+                if (state === 'connecting') updateStatus('🤝 Establishing secure connection...', 'connecting');
+                else if (state === 'connected') { updateStatus('✅ Listening...', 'connected'); stopBtn.disabled = false; }
+                else if (state === 'failed' || state === 'closed' || state === 'disconnected') stop();
+            };
+
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+
+            ws.onopen = async () => {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp, type: 'offer' }));
+            };
+
+            ws.onmessage = async e => {
+                const data = JSON.parse(e.data);
+                if (data.type === 'answer' && !pc.currentRemoteDescription) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(data));
+                } else if (data.type === 'ice-candidate') {
+                    await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            };
+
+            const closeHandler = () => { if (pc && pc.connectionState !== 'closed') stop(); };
+            ws.onclose = closeHandler;
+            ws.onerror = closeHandler;
+
+        } catch (err) { console.error(err); updateStatus(`❌ Error: ${err.message}`, 'disconnected'); stop(); }
+    }
+
+    function stop() {
+        if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
+        if (pc) { pc.onconnectionstatechange = null; pc.onicecandidate = null; pc.ontrack = null; pc.close(); pc = null; }
+        if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
+        updateStatus('🔌 Disconnected', 'disconnected');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+    }
+</script>
+</body>
+</html>
